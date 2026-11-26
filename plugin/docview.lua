@@ -18,6 +18,10 @@ vim.api.nvim_create_user_command("DocviewInfo", function()
   require("docview").info()
 end, { desc = "Show which converter rendered the current document" })
 
+vim.api.nvim_create_user_command("DocviewEdit", function()
+  require("docview.edit").start(0)
+end, { desc = "Edit the current document as Markdown (Word, ODT, RTF) or CSV (Excel)" })
+
 vim.api.nvim_create_user_command("DocviewToggle", function()
   require("docview").toggle()
 end, { desc = "Switch between page images and text" })

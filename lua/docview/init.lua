@@ -19,8 +19,13 @@ M.config = {
     -- Pages rendered per Ghostscript run; each batch appears as soon as it is ready.
     chunk_size = 6,
   },
+  edit = {
+    -- Show the real pages in a split while editing, refreshed on every save.
+    preview = true,
+  },
   -- Buffer-local keymaps; set any to false to disable it.
   keymaps = {
+    edit = "i",
     next_page = "]p",
     prev_page = "[p",
     open_external = "gO",
@@ -192,13 +197,20 @@ function M.convert(path, ext)
   return nil, tried
 end
 
-local function set_keymaps(buf)
-  local km = M.config.keymaps
+--- Sets the viewer keymaps on `buf`, except the ones named in `skip`.
+function M.set_keymaps(buf, skip)
+  local km = vim.deepcopy(M.config.keymaps)
+  for _, name in ipairs(skip or {}) do
+    km[name] = nil
+  end
   local function map(lhs, rhs, desc)
     if lhs then
       vim.keymap.set("n", lhs, rhs, { buffer = buf, silent = true, desc = desc })
     end
   end
+  map(km.edit, function()
+    require("docview.edit").start(buf)
+  end, "Edit document")
   -- Page headers look the same in both views; in the page view they are centred.
   local page_pattern = [[^\s*── Page \d\+ of \d\+ ──]]
   map(km.next_page, function()
@@ -302,10 +314,13 @@ function M.render(buf, path, view)
 
   -- Never let :w write converted text over the original document. ('modifiable' is off too;
   -- 'readonly' is not used because every redraw would warn about changing a readonly file.)
+  if package.loaded["docview.edit"] then
+    require("docview.edit").stop(buf)
+  end
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].swapfile = false
 
-  set_keymaps(buf)
+  M.set_keymaps(buf)
   local note
   if (view or M.config.view) == "pages" and vim.fn.filereadable(path) == 1 then
     local ok, reason = show_pages(buf, path)

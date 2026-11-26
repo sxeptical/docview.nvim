@@ -29,6 +29,18 @@ function M.check()
   if docview.config.view == "pages" then
     check_pages()
   end
+  vim.health.start("docview: editing")
+  if vim.fn.executable("pandoc") == 1 then
+    vim.health.ok("pandoc edits .docx, .odt and .rtf as Markdown")
+  else
+    vim.health.warn("pandoc not found; Word, ODT and RTF files can't be edited (brew install pandoc)")
+  end
+  if vim.fn.executable("zip") == 1 and vim.fn.executable("unzip") == 1 then
+    vim.health.ok("zip/unzip edit .xlsx as CSV")
+  else
+    vim.health.warn("zip/unzip not found; spreadsheets can't be edited")
+  end
+
   vim.health.start("docview: text view")
   for _, ext in ipairs(docview.config.extensions) do
     local available, missing = {}, {}

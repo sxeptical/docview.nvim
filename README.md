@@ -4,8 +4,8 @@ Open PDFs, Word documents, spreadsheets and slides in Neovim. In kitty, Ghostty 
 WezTerm you see the real pages, with their fonts, layout and images, the way a PDF viewer shows them.
 Press `<Tab>` for the text version to search, yank or read anywhere else.
 
-`:e report.docx` (or picking the file from any explorer or picker) just works. The
-original file is never modified: `:w` is refused.
+`:e report.docx` (or picking the file from any explorer or picker) just works. Viewing
+never modifies the file (`:w` is refused); press `i` to edit Word, ODT, RTF and Excel files.
 
 ## Page view
 
@@ -22,6 +22,24 @@ the rest are still rendering. `:DocviewClearCache` frees the space.
 
 When page images aren't possible (another terminal, missing tools), documents open as text
 and `:DocviewInfo` says why.
+
+## Editing
+
+Press `i` (or `:DocviewEdit`) in a Word, ODT, RTF or Excel document to edit it. `:w`
+saves back to the original file, with the real pages in a split on the right that refresh
+on every save. `:e` returns to the viewer.
+
+| Format                   | Edited as | Kept on save                                                                 | Lost on save                                                                                   |
+| ------------------------ | --------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `.docx` `.odt`           | Markdown  | Text, headings, lists, bold/italic, links, tables, images, footnotes; fonts, heading styles, margins, headers and footers (the original is the style template) | Comments, tracked changes, text boxes, columns, formatting applied by hand to single words |
+| `.rtf`                   | Markdown  | Text and basic formatting                                                    | Fonts and page layout                                                                          |
+| `.xlsx`                  | CSV       | Values, formulas (shown as `=SUM(A1:A3)`), sheets (`### Sheet: Name` lines)  | Cell formatting, number formats (dates become numbers), column widths, charts                  |
+
+Before the first save of each editing session the original is copied to
+`~/.local/share/nvim/docview/backups/`, so nothing is ever lost. `:w notes.md` or
+`:w data.csv` writes the Markdown/CSV itself; `:w copy.docx` saves a converted copy.
+
+Editing Word, ODT and RTF needs [pandoc](https://pandoc.org): `brew install pandoc`.
 
 ## Text view
 
@@ -51,6 +69,7 @@ Without a plugin manager: `vim.opt.rtp:prepend("~/path/to/docview.nvim")`.
 
 | Key / command          | Action                                             |
 | ---------------------- | -------------------------------------------------- |
+| `i`                    | Edit the document (`:DocviewEdit`)                 |
 | `<Tab>`                | Switch between pages and text (`:DocviewToggle`)   |
 | `]p` / `[p`            | Next / previous page (takes a count)               |
 | `+` / `-` / `=`        | Zoom in / out / fit to window (page view)          |
@@ -71,10 +90,14 @@ require("docview").setup({
     max_width = 100, -- widest a page is drawn, in columns, at zoom 1
     chunk_size = 6, -- pages rendered per batch
   },
+  edit = {
+    preview = true, -- real pages in a split while editing, refreshed on save
+  },
   pdf_layout = true, -- pdftotext -layout keeps columns and tables aligned (text view)
   pandoc_args = { "--to=gfm", "--wrap=auto", "--columns=100" },
   timeout = 60000,
   keymaps = { -- false disables one
+    edit = "i",
     next_page = "]p",
     prev_page = "[p",
     open_external = "gO",
