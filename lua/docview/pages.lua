@@ -14,6 +14,7 @@ local M = {}
 ---@field rendered table<number, boolean>
 ---@field layout table<number, {header:number, first:number, last:number, width:number, offset:number}>
 ---@field placed table<number, snacks.image.Placement>
+---@field sharpening table<string, boolean> sharper renders started, as "page@dpi"
 ---@field zoom number
 ---@field status? string
 ---@field closed? boolean
@@ -69,13 +70,36 @@ local function exists(file)
   return vim.uv.fs_stat(file) ~= nil
 end
 
-local function page_png(st, i)
-  return ("%s/page-%04d.png"):format(st.dir, i)
+-- Pages are rendered at `config.dpi`; zooming in re-renders the visible ones sharper.
+local function page_png(st, i, dpi)
+  return ("%s/page-%04d-%d.png"):format(st.dir, i, dpi or config().dpi)
+end
+
+-- The resolution snacks.nvim believes a PNG has. It reads ImageMagick's density, which
+-- for PNGs is pixels per centimetre, and uses it as DPI; mirror that to know how large
+-- snacks will draw a page, since it never scales an image beyond that size.
+local function snacks_dpi(png)
+  local fd = io.open(png, "rb")
+  if not fd then
+    return 72
+  end
+  local head = fd:read(512) or ""
+  fd:close()
+  local at = head:find("pHYs", 1, true)
+  if not at then
+    return 72
+  end
+  local x = head:byte(at + 4) * 16777216 + head:byte(at + 5) * 65536 + head:byte(at + 6) * 256 + head:byte(at + 7)
+  local unit = head:byte(at + 12)
+  if unit ~= 1 or x == 0 then
+    return 72
+  end
+  return x / 100
 end
 
 local function cache_dir(path)
   local stat = assert(vim.uv.fs_stat(path))
-  local key = table.concat({ path, stat.size, stat.mtime.sec, stat.mtime.nsec, config().dpi }, ":")
+  local key = table.concat({ path, stat.size, stat.mtime.sec, stat.mtime.nsec }, ":")
   local dir = vim.fn.stdpath("cache") .. "/docview/" .. vim.fn.sha256(key):sub(1, 16)
   vim.fn.mkdir(dir, "p")
   return dir
@@ -145,16 +169,17 @@ local function page_count(pdf, cb)
   end)
 end
 
-local function render_range(st, first, last, cb)
-  local pattern = ("%s/chunk-%d-%%d.png"):format(st.dir, first)
-  local cmd = { "gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r" .. config().dpi }
+local function render_range(st, first, last, cb, dpi)
+  dpi = dpi or config().dpi
+  local pattern = ("%s/chunk-%d-%d-%%d.png"):format(st.dir, dpi, first)
+  local cmd = { "gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r" .. dpi }
   vim.list_extend(cmd, { "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4" })
   vim.list_extend(cmd, { "-dFirstPage=" .. first, "-dLastPage=" .. last, "-o", pattern, st.pdf })
   run(cmd, function(ok, err)
     for i = first, last do
       local chunk = pattern:format(i - first + 1)
       if exists(chunk) then
-        vim.uv.fs_rename(chunk, page_png(st, i))
+        vim.uv.fs_rename(chunk, page_png(st, i, dpi))
       end
     end
     cb(ok, err)
@@ -207,7 +232,27 @@ function M.sync(buf)
   for i, l in pairs(st.layout) do
     local near = l.last >= top - margin and l.first <= bot + margin
     if near and not st.placed[i] then
-      st.placed[i] = Snacks.image.placement.new(buf, page_png(st, i), {
+      local png = page_png(st, i)
+      if l.dpi > config().dpi then
+        if exists(page_png(st, i, l.dpi)) then
+          png = page_png(st, i, l.dpi)
+        elseif not st.sharpening[i .. "@" .. l.dpi] then
+          -- Show the page now and swap in a sharper render once it is ready.
+          st.sharpening[i .. "@" .. l.dpi] = true
+          render_range(st, i, i, function()
+            local current = st.layout[i]
+            if st.closed or not current or current.dpi ~= l.dpi or not exists(page_png(st, i, l.dpi)) then
+              return
+            end
+            if st.placed[i] then
+              pcall(st.placed[i].close, st.placed[i])
+              st.placed[i] = nil
+            end
+            M.sync(buf)
+          end, l.dpi)
+        end
+      end
+      st.placed[i] = Snacks.image.placement.new(buf, png, {
         pos = { l.first, l.offset },
         range = { l.first, l.offset, l.last, l.offset },
         inline = true,
@@ -289,13 +334,18 @@ function M.draw(buf)
     local width = math.max(20, math.min(avail, math.floor(fit * st.zoom)))
     for i = 1, st.count do
       local png = page_png(st, i)
-      local w, h = width, nil
+      local w, h, dpi = width, nil, config().dpi
       if st.rendered[i] then
         local dim = Snacks.image.util.dim(png)
-        -- Never wider than the image's natural size, or snacks would draw it smaller.
-        local natural = math.floor(dim.width / config().dpi * 96 * cells.scale / cells.cell_width)
+        -- Never wider than snacks' idea of the image's natural size, or it would draw it smaller.
+        local natural = math.floor(dim.width / snacks_dpi(png) * 96 * cells.scale / cells.cell_width)
         w = math.min(w, natural)
         h = math.ceil(w * dim.height / dim.width * cells.cell_width / cells.cell_height)
+        -- Resolution that gives about one image pixel per screen pixel at this width.
+        local needed = w * cells.cell_width / (dim.width / config().dpi)
+        if needed > dpi * 1.15 then
+          dpi = math.min(600, math.ceil(needed / 60) * 60)
+        end
       end
       local offset = math.max(0, math.floor((avail - w) / 2))
       local pad = string.rep(" ", offset)
@@ -306,7 +356,7 @@ function M.draw(buf)
         for _ = 1, h do
           lines[#lines + 1] = pad
         end
-        st.layout[i] = { header = header, first = header + 1, last = header + h, width = w, offset = offset }
+        st.layout[i] = { header = header, first = header + 1, last = header + h, width = w, offset = offset, dpi = dpi }
       else
         lines[#lines + 1] = pad .. "rendering…"
       end
@@ -366,6 +416,7 @@ function M.show(buf, path, on_fail)
     rendered = {},
     layout = {},
     placed = {},
+    sharpening = {},
     zoom = 1,
     status = vim.fn.fnamemodify(path, ":e"):lower() == "pdf" and "Rendering pages…"
       or "Converting with LibreOffice…",
@@ -463,13 +514,20 @@ function M.stop(buf)
   end
 end
 
+--- Zooms by `delta` (0.2 = 20%); 0 fits the page to the window again.
 function M.zoom(buf, delta)
   local st = M.state[buf]
-  if not st then
+  if not st or not st.count then
     return
   end
-  st.zoom = delta == 0 and 1 or math.max(0.3, math.min(3, st.zoom + delta))
+  local before = st.zoom
+  st.zoom = delta == 0 and 1 or math.max(0.3, st.zoom + delta)
   M.draw(buf)
+  local msg = ("docview: zoom %d%%"):format(math.floor(st.zoom * 100 + 0.5))
+  if delta > 0 and st.zoom <= before + 1e-6 then
+    msg = msg .. " (page already fills the window)"
+  end
+  vim.api.nvim_echo({ { msg } }, false, {})
 end
 
 return M
