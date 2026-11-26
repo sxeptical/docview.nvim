@@ -214,9 +214,31 @@ local function set_window_options(win, plain)
   end
 end
 
+-- Closes a page's placement. Once an image has no placements left it is freed in the
+-- terminal too: kitty keeps at most 320 MB of images and silently drops old unused ones
+-- when that fills up (which zooming does quickly), while snacks would assume they are
+-- still there and later draw an empty page.
+local function release(p)
+  pcall(p.close, p)
+  local img = p.img
+  if img and img.sent and not next(img.placements or {}) then
+    pcall(Snacks.image.terminal.request, { a = "d", d = "I", i = img.id })
+    img.sent = false
+  end
+end
+
+local function place(buf, png, opts)
+  -- An image left over from earlier may have been dropped by the terminal; send it again.
+  local ok, img = pcall(Snacks.image.image.new, png)
+  if ok and img.sent and not next(img.placements or {}) then
+    img.sent = false
+  end
+  return Snacks.image.placement.new(buf, png, opts)
+end
+
 local function close_placements(st)
   for i, p in pairs(st.placed) do
-    pcall(p.close, p)
+    release(p)
     st.placed[i] = nil
   end
 end
@@ -245,14 +267,14 @@ function M.sync(buf)
               return
             end
             if st.placed[i] then
-              pcall(st.placed[i].close, st.placed[i])
+              release(st.placed[i])
               st.placed[i] = nil
             end
             M.sync(buf)
           end, l.dpi)
         end
       end
-      st.placed[i] = Snacks.image.placement.new(buf, png, {
+      st.placed[i] = place(buf, png, {
         pos = { l.first, l.offset },
         range = { l.first, l.offset, l.last, l.offset },
         inline = true,
@@ -262,7 +284,7 @@ function M.sync(buf)
         type = "image",
       })
     elseif not near and st.placed[i] then
-      pcall(st.placed[i].close, st.placed[i])
+      release(st.placed[i])
       st.placed[i] = nil
     end
   end
@@ -344,7 +366,8 @@ function M.draw(buf)
         -- Resolution that gives about one image pixel per screen pixel at this width.
         local needed = w * cells.cell_width / (dim.width / config().dpi)
         if needed > dpi * 1.15 then
-          dpi = math.min(600, math.ceil(needed / 60) * 60)
+          -- Capped: a page at 480 DPI already takes ~85 MB of the terminal's image memory.
+          dpi = math.min(480, math.ceil(needed / 60) * 60)
         end
       end
       local offset = math.max(0, math.floor((avail - w) / 2))
