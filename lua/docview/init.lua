@@ -8,11 +8,26 @@ M.config = {
   pandoc_args = { "--to=gfm", "--wrap=auto", "--columns=100" },
   -- Milliseconds before a converter is given up on.
   timeout = 60000,
+  -- "pages" shows the real pages as images (kitty, Ghostty or WezTerm with snacks.nvim);
+  -- "text" shows the extracted text. Falls back to text when pages are not possible.
+  view = "pages",
+  pages = {
+    -- Resolution pages are rendered at; higher is sharper but slower.
+    dpi = 180,
+    -- Widest a page is drawn, in columns, before zooming.
+    max_width = 100,
+    -- Pages rendered per Ghostscript run; each batch appears as soon as it is ready.
+    chunk_size = 6,
+  },
   -- Buffer-local keymaps; set any to false to disable it.
   keymaps = {
     next_page = "]p",
     prev_page = "[p",
     open_external = "gO",
+    toggle_view = "<Tab>",
+    zoom_in = "+",
+    zoom_out = "-",
+    zoom_reset = "=",
   },
 }
 
@@ -146,8 +161,6 @@ local install_hints = {
   docx = "brew install pandoc",
 }
 
-local page_marker = "^── Page %d+ of %d+ ──"
-
 local function paginate(text)
   local pages = vim.split(text, "\f", { plain = true })
   if #pages > 1 and pages[#pages]:match("^%s*$") then
@@ -179,39 +192,50 @@ function M.convert(path, ext)
   return nil, tried
 end
 
-local function set_keymaps(buf, is_paged)
+local function set_keymaps(buf)
   local km = M.config.keymaps
   local function map(lhs, rhs, desc)
     if lhs then
       vim.keymap.set("n", lhs, rhs, { buffer = buf, silent = true, desc = desc })
     end
   end
-  if is_paged then
-    local vim_pattern = [[^── Page \d\+ of \d\+ ──]]
-    map(km.next_page, function()
-      for _ = 1, vim.v.count1 do
-        vim.fn.search(vim_pattern, "W")
-      end
-      vim.cmd("normal! zt")
-    end, "Next page")
-    map(km.prev_page, function()
-      for _ = 1, vim.v.count1 do
-        vim.fn.search(vim_pattern, "bW")
-      end
-      vim.cmd("normal! zt")
-    end, "Previous page")
-  end
+  -- Page headers look the same in both views; in the page view they are centred.
+  local page_pattern = [[^\s*── Page \d\+ of \d\+ ──]]
+  map(km.next_page, function()
+    for _ = 1, vim.v.count1 do
+      vim.fn.search(page_pattern, "W")
+    end
+    vim.cmd("normal! zt")
+  end, "Next page")
+  map(km.prev_page, function()
+    for _ = 1, vim.v.count1 do
+      vim.fn.search(page_pattern, "bW")
+    end
+    vim.cmd("normal! zt")
+  end, "Previous page")
   map(km.open_external, M.open_external, "Open in default application")
+  map(km.toggle_view, M.toggle, "Switch between pages and text")
+  map(km.zoom_in, function()
+    require("docview.pages").zoom(buf, 0.1 * vim.v.count1)
+  end, "Zoom in")
+  map(km.zoom_out, function()
+    require("docview.pages").zoom(buf, -0.1 * vim.v.count1)
+  end, "Zoom out")
+  map(km.zoom_reset, function()
+    require("docview.pages").zoom(buf, 0)
+  end, "Reset zoom")
 end
 
-function M.render(buf, path)
-  path = vim.fn.fnamemodify(path, ":p")
+local function set_lines(buf, lines)
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].modified = false
+end
+
+local function show_text(buf, path, note)
+  require("docview.pages").stop(buf)
   local ext = vim.fn.fnamemodify(path, ":e"):lower()
-
-  -- Never let :w write converted text over the original document.
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].swapfile = false
-
   local text, conv, lines, ft
   if vim.fn.filereadable(path) == 0 then
     lines, ft = { "docview: cannot read " .. path }, "text"
@@ -245,15 +269,56 @@ function M.render(buf, path)
     end
   end
 
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].modified = false
-  vim.bo[buf].readonly = true
+  set_lines(buf, lines)
   vim.bo[buf].filetype = ft
-  vim.b[buf].docview = { source = path, converter = conv and conv.name or nil }
+  vim.b[buf].docview = { source = path, view = "text", converter = conv and conv.name or nil, note = note }
+end
 
-  set_keymaps(buf, ext == "pdf" and lines[1] ~= nil and lines[1]:match(page_marker) ~= nil)
+local function show_pages(buf, path)
+  local pages = require("docview.pages")
+  local ok, reason = pages.available(path)
+  if not ok then
+    return false, reason
+  end
+  local is_pdf = vim.fn.fnamemodify(path, ":e"):lower() == "pdf"
+  vim.bo[buf].filetype = "docview"
+  vim.b[buf].docview = {
+    source = path,
+    view = "pages",
+    converter = is_pdf and "Ghostscript (page images)" or "LibreOffice + Ghostscript (page images)",
+  }
+  pages.show(buf, path, function(err)
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.notify("docview: " .. err .. "; showing text instead", vim.log.levels.WARN)
+      show_text(buf, path, err)
+    end
+  end)
+  return true
+end
+
+--- Renders `path` into `buf` as pages or text (`view` defaults to `config.view`).
+function M.render(buf, path, view)
+  path = vim.fn.fnamemodify(path, ":p")
+
+  -- Never let :w write converted text over the original document. ('modifiable' is off too;
+  -- 'readonly' is not used because every redraw would warn about changing a readonly file.)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].swapfile = false
+
+  set_keymaps(buf)
+  local note
+  if (view or M.config.view) == "pages" and vim.fn.filereadable(path) == 1 then
+    local ok, reason = show_pages(buf, path)
+    if ok then
+      return
+    end
+    note = "page view unavailable: " .. reason
+    if view == "pages" then
+      -- Asked for explicitly (e.g. the toggle key): say why, and keep the current view.
+      return vim.notify("docview: " .. note, vim.log.levels.WARN)
+    end
+  end
+  show_text(buf, path, note)
 end
 
 local function current_source()
@@ -269,12 +334,22 @@ function M.open_external()
   vim.ui.open(path)
 end
 
+function M.toggle()
+  local state = vim.b.docview
+  if not state then
+    return vim.notify("docview: not a docview buffer", vim.log.levels.WARN)
+  end
+  M.render(vim.api.nvim_get_current_buf(), state.source, state.view == "pages" and "text" or "pages")
+  vim.fn.winrestview({ topline = 1, lnum = 1 })
+end
+
 function M.reload()
-  if not vim.b.docview then
+  local state = vim.b.docview
+  if not state then
     return vim.notify("docview: not a docview buffer", vim.log.levels.WARN)
   end
   local view = vim.fn.winsaveview()
-  M.render(vim.api.nvim_get_current_buf(), vim.b.docview.source)
+  M.render(vim.api.nvim_get_current_buf(), state.source, state.view)
   vim.fn.winrestview(view)
 end
 
@@ -283,7 +358,8 @@ function M.info()
   if not state then
     return vim.notify("docview: not a docview buffer", vim.log.levels.WARN)
   end
-  vim.notify(("docview: %s rendered by %s"):format(state.source, state.converter or "nothing (conversion failed)"))
+  local msg = ("docview: %s rendered by %s"):format(state.source, state.converter or "nothing (conversion failed)")
+  vim.notify(state.note and (msg .. "\n" .. state.note) or msg)
 end
 
 -- The bundled zip plugin also opens .docx/.xlsx/.pptx/.odt with BufReadCmd and would append
@@ -327,7 +403,7 @@ function M.register()
   vim.api.nvim_create_autocmd("BufReadCmd", {
     group = group,
     pattern = patterns,
-    desc = "docview: render documents as text",
+    desc = "docview: render documents",
     callback = function(ev)
       claim(patterns)
       M.render(ev.buf, ev.match)

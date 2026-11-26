@@ -17,3 +17,13 @@ end, { desc = "Re-convert the current document" })
 vim.api.nvim_create_user_command("DocviewInfo", function()
   require("docview").info()
 end, { desc = "Show which converter rendered the current document" })
+
+vim.api.nvim_create_user_command("DocviewToggle", function()
+  require("docview").toggle()
+end, { desc = "Switch between page images and text" })
+
+vim.api.nvim_create_user_command("DocviewClearCache", function()
+  local dir = vim.fn.stdpath("cache") .. "/docview"
+  vim.fn.delete(dir, "rf")
+  vim.notify("docview: cleared " .. dir)
+end, { desc = "Delete cached page images and converted PDFs" })
