@@ -19,6 +19,12 @@ M.config = {
     -- Pages rendered per Ghostscript run; each batch appears as soon as it is ready.
     chunk_size = 6,
   },
+  -- Previews in snacks.nvim's picker.
+  picker = {
+    enabled = true,
+    -- Show the first page as an image (once rendered) instead of the text.
+    pages = true,
+  },
   edit = {
     -- Show the real pages in a split while editing, refreshed on every save.
     preview = true,
@@ -398,6 +404,7 @@ end
 
 function M.register()
   vim.api.nvim_clear_autocmds({ group = group })
+  require("docview.preview").hook()
   local patterns = {}
   for _, ext in ipairs(M.config.extensions) do
     patterns[#patterns + 1] = "*." .. ext:lower()

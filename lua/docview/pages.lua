@@ -143,7 +143,7 @@ local function next_conversion()
   attempt(1)
 end
 
-local function to_pdf(st, cb)
+local function to_pdf(st, cb, preview)
   if vim.fn.fnamemodify(st.source, ":e"):lower() == "pdf" then
     return cb(st.source)
   end
@@ -151,7 +151,16 @@ local function to_pdf(st, cb)
   if exists(out) then
     return cb(out)
   end
-  table.insert(office_queue, { source = st.source, dir = st.dir, out = out, cb = cb })
+  if preview then
+    -- Scrolling through a picker shouldn't queue a conversion per file: a newer preview
+    -- replaces older ones that haven't started yet.
+    for i = #office_queue, 1, -1 do
+      if office_queue[i].preview then
+        table.remove(office_queue, i)
+      end
+    end
+  end
+  table.insert(office_queue, { source = st.source, dir = st.dir, out = out, cb = cb, preview = preview })
   next_conversion()
 end
 
@@ -482,6 +491,27 @@ function M.show(buf, path, on_fail)
       M.draw(buf)
     end,
   })
+end
+
+--- Calls `cb(png)` with the first page of `path` as an image, rendering it if needed.
+--- Used by picker previews; calls nothing if the page can't be made.
+function M.first_page(path, cb)
+  local st = { source = path, dir = cache_dir(path) }
+  local png = page_png(st, 1)
+  if exists(png) then
+    return cb(png)
+  end
+  to_pdf(st, function(pdf)
+    if not pdf then
+      return
+    end
+    st.pdf = pdf
+    render_range(st, 1, 1, function()
+      if exists(png) then
+        cb(png)
+      end
+    end)
+  end, true)
 end
 
 local pending = {}

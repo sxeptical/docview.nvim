@@ -23,6 +23,13 @@ the rest are still rendering. `:DocviewClearCache` frees the space.
 When page images aren't possible (another terminal, missing tools), documents open as text
 and `:DocviewInfo` says why.
 
+## Picker previews
+
+In [snacks.nvim](https://github.com/folke/snacks.nvim)'s pickers (LazyVim's `<leader>ff`
+and friends) documents preview as their text, replaced by their first page once it has
+been rendered. Pages are cached, so documents you've previewed before show their page at
+once.
+
 ## Editing
 
 Press `i` (or `:DocviewEdit`) in a Word, ODT, RTF or Excel document to edit it. `:w`
@@ -89,6 +96,10 @@ require("docview").setup({
     dpi = 180, -- render resolution; higher is sharper but slower
     max_width = 100, -- widest a page is drawn, in columns, at zoom 1
     chunk_size = 6, -- pages rendered per batch
+  },
+  picker = {
+    enabled = true, -- preview documents in snacks.nvim's picker
+    pages = true, -- show the first page instead of the text once it is rendered
   },
   edit = {
     preview = true, -- real pages in a split while editing, refreshed on save
