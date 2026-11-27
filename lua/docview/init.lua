@@ -290,6 +290,8 @@ local function show_text(buf, path, note)
   set_lines(buf, lines)
   vim.bo[buf].filetype = ft
   vim.b[buf].docview = { source = path, view = "text", converter = conv and conv.name or nil, note = note }
+  -- After 'filetype': ftplugins map keys too (markdown maps gO to an outline).
+  M.set_keymaps(buf)
 end
 
 local function show_pages(buf, path)
@@ -300,6 +302,7 @@ local function show_pages(buf, path)
   end
   local is_pdf = vim.fn.fnamemodify(path, ":e"):lower() == "pdf"
   vim.bo[buf].filetype = "docview"
+  M.set_keymaps(buf)
   vim.b[buf].docview = {
     source = path,
     view = "pages",
@@ -352,7 +355,29 @@ function M.open_external()
   if path == "" then
     return vim.notify("docview: buffer has no file", vim.log.levels.WARN)
   end
-  vim.ui.open(path)
+  local name = vim.fn.fnamemodify(path, ":t")
+  local function failed(msg)
+    vim.notify(("docview: could not open %s: %s"):format(name, msg), vim.log.levels.ERROR)
+  end
+  vim.notify(("docview: opening %s in its default app…"):format(name))
+  if vim.fn.has("mac") == 1 then
+    -- vim.ui.open drops the opener's errors, so run `open` directly and report them.
+    local ok, err = pcall(vim.system, { "open", path }, { text = true }, function(r)
+      if r.code ~= 0 then
+        vim.schedule(function()
+          failed(vim.trim(r.stderr or "") ~= "" and vim.trim(r.stderr) or ("open exited with code " .. r.code))
+        end)
+      end
+    end)
+    if not ok then
+      failed(err)
+    end
+  else
+    local _, err = vim.ui.open(path)
+    if err then
+      failed(err)
+    end
+  end
 end
 
 function M.toggle()
