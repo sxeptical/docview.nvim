@@ -1,6 +1,8 @@
 -- Previews documents in snacks.nvim's picker, which would otherwise call them binary files.
--- The text shows at once; the first page replaces it when it has been rendered (cached,
--- so the next time a document is previewed its page shows immediately).
+-- Documents show as scrollable pages, drawn by the same code as the full viewer: only pages
+-- near the visible part are sent to the terminal, and rendering stops when the picker moves
+-- to another item (snacks wipes the preview buffer). Until an Office file has been converted
+-- to PDF, which takes a few seconds the first time, its text is shown instead.
 local M = {}
 
 ---@type table<string, {key:string, lines:string[], ft:string}>
@@ -28,10 +30,22 @@ local function document_text(path, ext)
   return lines, ft
 end
 
-local function show_page(ctx, path, png)
+local function show_text(ctx, path, ext)
+  local lines, ft = document_text(path, ext)
+  ctx.preview:reset()
+  ctx.preview:set_title(vim.fn.fnamemodify(path, ":t"))
+  ctx.preview:set_lines(lines)
+  ctx.preview:highlight({ ft = ft })
+end
+
+local function show_pages(ctx, path, ext)
   local buf = ctx.preview:scratch()
   ctx.preview:set_title(vim.fn.fnamemodify(path, ":t"))
-  Snacks.image.buf.attach(buf, { src = png })
+  require("docview.pages").show(buf, path, function()
+    if ctx.preview.item == ctx.item and ctx.preview.win:valid() then
+      show_text(ctx, path, ext)
+    end
+  end)
 end
 
 --- Previews `ctx.item` if it is a document; returns false to leave it to snacks.
@@ -53,36 +67,29 @@ function M.file(ctx)
   if not vim.tbl_contains(docview.config.extensions, ext) then
     return false
   end
-  -- snacks draws PDFs (page 1) itself when its image support is on.
-  if Snacks.image.supports_file(path) and Snacks.image.config.enabled ~= false then
-    return false
-  end
 
   local pages = require("docview.pages")
   if docview.config.picker.pages and pages.available(path) then
-    local shown = false
-    pages.first_page(path, function(png)
-      -- Already cached: show the page straight away instead of the text.
-      if not shown then
-        shown = true
-        return show_page(ctx, path, png)
+    local waiting = true
+    pages.prepare(path, function(ready)
+      if ready then
+        waiting = false
+        return show_pages(ctx, path, ext)
       end
-      -- Rendered later: only if the picker still shows this item.
+      -- Converted later: only switch if the picker still shows this item.
       if ctx.preview.item == item and ctx.preview.win:valid() then
-        show_page(ctx, path, png)
+        show_pages(ctx, path, ext)
       end
     end)
-    if shown then
+    if not waiting then
       return true
     end
-    shown = true
+  elseif Snacks.image.supports_file(path) and Snacks.image.config.enabled ~= false then
+    -- No page view here, but snacks can still draw the first page of a PDF.
+    return false
   end
 
-  local lines, ft = document_text(path, ext)
-  ctx.preview:reset()
-  ctx.preview:set_title(vim.fn.fnamemodify(path, ":t"))
-  ctx.preview:set_lines(lines)
-  ctx.preview:highlight({ ft = ft })
+  show_text(ctx, path, ext)
   return true
 end
 

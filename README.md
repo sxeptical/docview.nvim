@@ -26,9 +26,12 @@ and `:DocviewInfo` says why.
 ## Picker previews
 
 In [snacks.nvim](https://github.com/folke/snacks.nvim)'s pickers (LazyVim's `<leader>ff`
-and friends) documents preview as their text, replaced by their first page once it has
-been rendered. Pages are cached, so documents you've previewed before show their page at
-once.
+and friends) documents preview as their real pages, which you can scroll through with the
+picker's preview keys (`<C-f>` / `<C-b>`). Only the pages near what's visible are kept in
+the terminal, and rendering stops as soon as you move to another file.
+
+The first time an Office file is previewed, its text shows for the few seconds LibreOffice
+takes to convert it; after that it is cached and its pages show at once.
 
 ## Editing
 
@@ -99,7 +102,7 @@ require("docview").setup({
   },
   picker = {
     enabled = true, -- preview documents in snacks.nvim's picker
-    pages = true, -- show the first page instead of the text once it is rendered
+    pages = true, -- show pages instead of text in previews
   },
   edit = {
     preview = true, -- real pages in a split while editing, refreshed on save

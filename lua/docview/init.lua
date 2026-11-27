@@ -22,7 +22,7 @@ M.config = {
   -- Previews in snacks.nvim's picker.
   picker = {
     enabled = true,
-    -- Show the first page as an image (once rendered) instead of the text.
+    -- Show the pages (scrollable) instead of the text.
     pages = true,
   },
   edit = {

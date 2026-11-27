@@ -450,9 +450,11 @@ function M.show(buf, path, on_fail)
     placed = {},
     sharpening = {},
     zoom = 1,
-    status = vim.fn.fnamemodify(path, ":e"):lower() == "pdf" and "Rendering pages…"
-      or "Converting with LibreOffice…",
+    status = "Rendering pages…",
   }
+  if vim.fn.fnamemodify(path, ":e"):lower() ~= "pdf" and not exists(st.dir .. "/document.pdf") then
+    st.status = "Converting with LibreOffice…"
+  end
   M.state[buf] = st
   M.draw(buf)
 
@@ -493,24 +495,19 @@ function M.show(buf, path, on_fail)
   })
 end
 
---- Calls `cb(png)` with the first page of `path` as an image, rendering it if needed.
---- Used by picker previews; calls nothing if the page can't be made.
-function M.first_page(path, cb)
+--- Converts `path` to PDF if needed, then calls `cb(ready)`; `ready` is true when it was
+--- already converted (or is a PDF), so `M.show` can draw pages without waiting.
+--- Used by picker previews, whose conversions replace each other while queued.
+function M.prepare(path, cb)
   local st = { source = path, dir = cache_dir(path) }
-  local png = page_png(st, 1)
-  if exists(png) then
-    return cb(png)
+  local cached = vim.fn.fnamemodify(path, ":e"):lower() == "pdf" or exists(st.dir .. "/document.pdf")
+  if cached then
+    return cb(true)
   end
   to_pdf(st, function(pdf)
-    if not pdf then
-      return
+    if pdf then
+      cb(false)
     end
-    st.pdf = pdf
-    render_range(st, 1, 1, function()
-      if exists(png) then
-        cb(png)
-      end
-    end)
   end, true)
 end
 
