@@ -18,6 +18,8 @@ M.config = {
     max_width = 100,
     -- Pages rendered per Ghostscript run; each batch appears as soon as it is ready.
     chunk_size = 6,
+    -- Ghostscript processes rendering at once.
+    jobs = 3,
   },
   -- Previews in snacks.nvim's picker.
   picker = {
@@ -81,8 +83,8 @@ local function pandoc(from)
     available = function()
       return has("pandoc")
     end,
-    run = function(path)
-      return exec(vim.list_extend({ "pandoc", "--from=" .. from, path }, M.config.pandoc_args))
+    argv = function(path)
+      return vim.list_extend({ "pandoc", "--from=" .. from, path }, M.config.pandoc_args)
     end,
   }
 end
@@ -94,8 +96,8 @@ local function command(name, args, ft)
     available = function()
       return has(name)
     end,
-    run = function(path)
-      return exec(vim.list_extend({ name }, args(path)))
+    argv = function(path)
+      return vim.list_extend({ name }, args(path))
     end,
   }
 end
@@ -126,8 +128,8 @@ local pdfkit = {
   available = function()
     return vim.fn.has("mac") == 1 and has("osascript")
   end,
-  run = function(path)
-    return exec({ "osascript", "-l", "JavaScript", "-e", pdfkit_script, path })
+  argv = function(path)
+    return { "osascript", "-l", "JavaScript", "-e", pdfkit_script, path }
   end,
 }
 
@@ -193,7 +195,9 @@ function M.convert(path, ext)
   local tried = {}
   for _, conv in ipairs(M.converters[ext] or {}) do
     if conv.available() then
-      local ok, text, err = pcall(conv.run, path)
+      local ok, text, err = pcall(conv.run or function(p)
+        return exec(conv.argv(p))
+      end, path)
       if ok and text then
         return text, conv
       end
@@ -201,6 +205,74 @@ function M.convert(path, ext)
     end
   end
   return nil, tried
+end
+
+--- Like `M.convert`, but runs external converters in the background so the editor never
+--- waits on them. Calls `cb(text, converter)` on success or `cb(nil, errors)`.
+function M.convert_async(path, ext, cb)
+  local list = vim.tbl_filter(function(conv)
+    return conv.available()
+  end, M.converters[ext] or {})
+  local tried = {}
+  local function try(i)
+    local conv = list[i]
+    if not conv then
+      return cb(nil, tried)
+    end
+    local function fail(err)
+      tried[#tried + 1] = ("%s: %s"):format(conv.name, err or "failed")
+      try(i + 1)
+    end
+    if not conv.argv then
+      -- Built-in readers only unzip a few XML files; they are quick enough to run inline.
+      local ok, text, err = pcall(conv.run, path)
+      if ok and text then
+        return cb(text, conv)
+      end
+      return fail(ok and err or text)
+    end
+    local ok, err = pcall(vim.system, conv.argv(path), { text = true, timeout = M.config.timeout }, function(r)
+      vim.schedule(function()
+        if r.code == 0 then
+          return cb(r.stdout, conv)
+        end
+        local msg = vim.trim(r.stderr or "")
+        fail(msg ~= "" and msg or ("exited with code " .. r.code))
+      end)
+    end)
+    if not ok then
+      fail(err)
+    end
+  end
+  try(1)
+end
+
+--- Turns converter output (or failure) into buffer lines and a filetype.
+function M.text_lines(path, ext, text, conv)
+  if text then
+    text = text:gsub("\r\n?", "\n")
+    if ext == "pdf" then
+      text = paginate(text)
+    end
+    local lines = vim.split(vim.trim(text) == "" and "(no text found in document)" or text, "\n", { plain = true })
+    while #lines > 1 and lines[#lines]:match("^%s*$") do
+      lines[#lines] = nil
+    end
+    return lines, conv.ft
+  end
+  local lines = { ("docview: could not convert %s"):format(vim.fn.fnamemodify(path, ":t")), "" }
+  if #conv == 0 then
+    lines[#lines + 1] = "No converter for ." .. ext .. " is installed."
+  else
+    for _, err in ipairs(conv) do
+      vim.list_extend(lines, vim.split(err, "\n", { plain = true }))
+    end
+  end
+  if install_hints[ext] then
+    vim.list_extend(lines, { "", "Try: " .. install_hints[ext] })
+  end
+  lines[#lines + 1] = "Press gO (or run :DocviewOpen) to open it in its default application."
+  return lines, "text"
 end
 
 --- Sets the viewer keymaps on `buf`, except the ones named in `skip`.
@@ -251,47 +323,42 @@ local function set_lines(buf, lines)
   vim.bo[buf].modified = false
 end
 
-local function show_text(buf, path, note)
+-- The latest text conversion per buffer; an older one finishing late is ignored.
+local text_jobs = {}
+
+local function show_text(buf, path, note, on_done)
   require("docview.pages").stop(buf)
   local ext = vim.fn.fnamemodify(path, ":e"):lower()
-  local text, conv, lines, ft
-  if vim.fn.filereadable(path) == 0 then
-    lines, ft = { "docview: cannot read " .. path }, "text"
-  else
-    text, conv = M.convert(path, ext)
-    if text then
-      text = text:gsub("\r\n?", "\n")
-      if ext == "pdf" then
-        text = paginate(text)
-      end
-      lines = vim.split(vim.trim(text) == "" and "(no text found in document)" or text, "\n", { plain = true })
-      while #lines > 1 and lines[#lines]:match("^%s*$") do
-        lines[#lines] = nil
-      end
-      ft = conv.ft
-    else
-      lines = { ("docview: could not convert %s"):format(vim.fn.fnamemodify(path, ":t")), "" }
-      if #conv == 0 then
-        lines[#lines + 1] = "No converter for ." .. ext .. " is installed."
-      else
-        for _, err in ipairs(conv) do
-          vim.list_extend(lines, vim.split(err, "\n", { plain = true }))
-        end
-      end
-      if install_hints[ext] then
-        vim.list_extend(lines, { "", "Try: " .. install_hints[ext] })
-      end
-      lines[#lines + 1] = "Press gO (or run :DocviewOpen) to open it in its default application."
-      ft = "text"
-      conv = nil
+  local function finish(lines, ft, conv)
+    set_lines(buf, lines)
+    vim.bo[buf].filetype = ft
+    vim.b[buf].docview = { source = path, view = "text", converter = conv and conv.name or nil, note = note }
+    -- After 'filetype': ftplugins map keys too (markdown maps gO to an outline).
+    M.set_keymaps(buf)
+    if on_done then
+      on_done()
     end
   end
+  if vim.fn.filereadable(path) == 0 then
+    return finish({ "docview: cannot read " .. path }, "text")
+  end
 
-  set_lines(buf, lines)
-  vim.bo[buf].filetype = ft
-  vim.b[buf].docview = { source = path, view = "text", converter = conv and conv.name or nil, note = note }
-  -- After 'filetype': ftplugins map keys too (markdown maps gO to an outline).
+  local job = {}
+  text_jobs[buf] = job
+  set_lines(buf, { "  Loading text…" })
+  vim.bo[buf].filetype = "text"
+  vim.b[buf].docview = { source = path, view = "text", note = note }
   M.set_keymaps(buf)
+  M.convert_async(path, ext, function(text, conv)
+    -- Skip if the buffer is gone, switched to pages or editing, or loading again.
+    local state = vim.api.nvim_buf_is_valid(buf) and vim.b[buf].docview
+    if text_jobs[buf] ~= job or not state or state.view ~= "text" then
+      return
+    end
+    text_jobs[buf] = nil
+    local lines, ft = M.text_lines(path, ext, text, conv)
+    finish(lines, ft, text and conv or nil)
+  end)
 end
 
 local function show_pages(buf, path)
@@ -318,7 +385,8 @@ local function show_pages(buf, path)
 end
 
 --- Renders `path` into `buf` as pages or text (`view` defaults to `config.view`).
-function M.render(buf, path, view)
+--- `on_done` runs once the text view has its content (right away for pages).
+function M.render(buf, path, view, on_done)
   path = vim.fn.fnamemodify(path, ":p")
 
   -- Never let :w write converted text over the original document. ('modifiable' is off too;
@@ -334,7 +402,7 @@ function M.render(buf, path, view)
   if (view or M.config.view) == "pages" and vim.fn.filereadable(path) == 1 then
     local ok, reason = show_pages(buf, path)
     if ok then
-      return
+      return on_done and on_done()
     end
     note = "page view unavailable: " .. reason
     if view == "pages" then
@@ -342,7 +410,7 @@ function M.render(buf, path, view)
       return vim.notify("docview: " .. note, vim.log.levels.WARN)
     end
   end
-  show_text(buf, path, note)
+  show_text(buf, path, note, on_done)
 end
 
 local function current_source()
@@ -394,9 +462,14 @@ function M.reload()
   if not state then
     return vim.notify("docview: not a docview buffer", vim.log.levels.WARN)
   end
-  local view = vim.fn.winsaveview()
-  M.render(vim.api.nvim_get_current_buf(), state.source, state.view)
-  vim.fn.winrestview(view)
+  local view, win = vim.fn.winsaveview(), vim.api.nvim_get_current_win()
+  M.render(vim.api.nvim_get_current_buf(), state.source, state.view, function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_call(win, function()
+        vim.fn.winrestview(view)
+      end)
+    end
+  end)
 end
 
 function M.info()

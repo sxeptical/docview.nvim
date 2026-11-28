@@ -99,6 +99,7 @@ require("docview").setup({
     dpi = 180, -- render resolution; higher is sharper but slower
     max_width = 100, -- widest a page is drawn, in columns, at zoom 1
     chunk_size = 6, -- pages rendered per batch
+    jobs = 3, -- Ghostscript processes rendering at once
   },
   picker = {
     enabled = true, -- preview documents in snacks.nvim's picker

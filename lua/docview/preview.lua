@@ -8,34 +8,34 @@ local M = {}
 ---@type table<string, {key:string, lines:string[], ft:string}>
 local text_cache = {}
 
-local function document_text(path, ext)
+local function cache_key(path)
   local stat = vim.uv.fs_stat(path)
-  local key = stat and (stat.size .. ":" .. stat.mtime.sec .. ":" .. stat.mtime.nsec) or ""
-  local hit = text_cache[path]
-  if hit and hit.key == key then
-    return hit.lines, hit.ft
-  end
-  local text, conv = require("docview").convert(path, ext)
-  local lines, ft
-  if text then
-    lines = vim.split(vim.trim(text:gsub("\r\n?", "\n")), "\n", { plain = true })
-    ft = conv.ft
-    if #lines == 1 and lines[1] == "" then
-      lines = { "(no text found in document)" }
-    end
-  else
-    lines, ft = { "No text preview: no converter for ." .. ext .. " is installed." }, "text"
-  end
-  text_cache[path] = { key = key, lines = lines, ft = ft }
-  return lines, ft
+  return stat and (stat.size .. ":" .. stat.mtime.sec .. ":" .. stat.mtime.nsec) or ""
 end
 
-local function show_text(ctx, path, ext)
-  local lines, ft = document_text(path, ext)
+local function set_text(ctx, path, lines, ft)
   ctx.preview:reset()
   ctx.preview:set_title(vim.fn.fnamemodify(path, ":t"))
   ctx.preview:set_lines(lines)
   ctx.preview:highlight({ ft = ft })
+end
+
+-- Converts in the background, so moving through the picker never waits on pandoc.
+local function show_text(ctx, path, ext)
+  local key, hit = cache_key(path), text_cache[path]
+  if hit and hit.key == key then
+    return set_text(ctx, path, hit.lines, hit.ft)
+  end
+  set_text(ctx, path, { "Loading…" }, "text")
+  local item = ctx.item
+  require("docview").convert_async(path, ext, function(text, conv)
+    local lines, ft = require("docview").text_lines(path, ext, text, conv)
+    text_cache[path] = { key = key, lines = lines, ft = ft }
+    -- Only if the picker still shows this item as text (the pages may have taken over).
+    if ctx.preview.item == item and ctx.preview.win:valid() and not require("docview.pages").state[ctx.buf] then
+      set_text(ctx, path, lines, ft)
+    end
+  end)
 end
 
 local function show_pages(ctx, path, ext)
@@ -84,7 +84,7 @@ function M.file(ctx)
     if not waiting then
       return true
     end
-  elseif Snacks.image.supports_file(path) and Snacks.image.config.enabled ~= false then
+  elseif Snacks.image.supports(path) and Snacks.image.config.enabled ~= false then
     -- No page view here, but snacks can still draw the first page of a PDF.
     return false
   end

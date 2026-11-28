@@ -14,6 +14,8 @@ local M = {}
 ---@field rendered table<number, boolean>
 ---@field layout table<number, {header:number, first:number, last:number, width:number, offset:number}>
 ---@field placed table<number, snacks.image.Placement>
+---@field placed_at table<number, table> the layout each placement was drawn with
+---@field dirty_from? number first buffer line replaced since the last sync
 ---@field sharpening table<string, boolean> sharper renders started, as "page@dpi"
 ---@field zoom number
 ---@field status? string
@@ -250,19 +252,34 @@ local function close_placements(st)
     release(p)
     st.placed[i] = nil
   end
+  st.placed_at = {}
 end
 
--- Only pages near the viewport get an image, so long documents stay light.
+local function same_layout(a, b)
+  return a and b and a.first == b.first and a.last == b.last and a.width == b.width and a.offset == b.offset
+end
+
+-- Only pages near the viewport get an image, so long documents stay light. A page that is
+-- already shown keeps its image in the terminal: if it moved or was resized, its placement
+-- is redrawn in place, which costs nothing, instead of sending the image again.
 function M.sync(buf)
   local st, win = M.state[buf], win_for(buf)
   if not st or st.closed or not win or not st.count then
     return
   end
+  local dirty = st.dirty_from or math.huge
+  st.dirty_from = nil
   local top, bot = vim.fn.line("w0", win), vim.fn.line("w$", win)
   local margin = vim.api.nvim_win_get_height(win)
+  for i, p in pairs(st.placed) do
+    if not st.layout[i] then
+      release(p)
+      st.placed[i], st.placed_at[i] = nil, nil
+    end
+  end
   for i, l in pairs(st.layout) do
     local near = l.last >= top - margin and l.first <= bot + margin
-    if near and not st.placed[i] then
+    if near then
       local png = page_png(st, i)
       if l.dpi > config().dpi then
         if exists(page_png(st, i, l.dpi)) then
@@ -272,18 +289,18 @@ function M.sync(buf)
           st.sharpening[i .. "@" .. l.dpi] = true
           render_range(st, i, i, function()
             local current = st.layout[i]
-            if st.closed or not current or current.dpi ~= l.dpi or not exists(page_png(st, i, l.dpi)) then
-              return
+            if not st.closed and current and current.dpi == l.dpi and exists(page_png(st, i, l.dpi)) then
+              M.sync(buf)
             end
-            if st.placed[i] then
-              release(st.placed[i])
-              st.placed[i] = nil
-            end
-            M.sync(buf)
           end, l.dpi)
         end
       end
-      st.placed[i] = place(buf, png, {
+      local p = st.placed[i]
+      if p and p.img.src ~= png then
+        release(p)
+        st.placed[i], p = nil, nil
+      end
+      local opts = {
         pos = { l.first, l.offset },
         range = { l.first, l.offset, l.last, l.offset },
         inline = true,
@@ -291,10 +308,18 @@ function M.sync(buf)
         width = l.width,
         height = l.last - l.first + 1,
         type = "image",
-      })
-    elseif not near and st.placed[i] then
+      }
+      if not p then
+        st.placed[i] = place(buf, png, opts)
+      elseif not same_layout(st.placed_at[i], l) or l.last >= dirty then
+        p.opts = vim.tbl_extend("force", p.opts, opts)
+        p._state = nil
+        p:update()
+      end
+      st.placed_at[i] = vim.deepcopy(l)
+    elseif st.placed[i] then
       release(st.placed[i])
-      st.placed[i] = nil
+      st.placed[i], st.placed_at[i] = nil, nil
     end
   end
 end
@@ -349,7 +374,6 @@ function M.draw(buf)
     return
   end
   local pos = st.count and next(st.layout) and current_position(buf, st)
-  close_placements(st)
   st.layout = {}
 
   local lines = {}
@@ -396,10 +420,19 @@ function M.draw(buf)
     end
   end
 
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].modified = false
+  -- Only replace from the first changed line, so pages above keep their place untouched.
+  local old = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local from = 1
+  while from <= #lines and from <= #old and lines[from] == old[from] do
+    from = from + 1
+  end
+  if from <= #lines or #old > #lines then
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, from - 1, -1, false, vim.list_slice(lines, from))
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].modified = false
+    st.dirty_from = math.min(st.dirty_from or math.huge, from)
+  end
   if win then
     set_window_options(win, true)
   end
@@ -407,36 +440,64 @@ function M.draw(buf)
   M.sync(buf)
 end
 
-local function render_all(buf, st)
-  local chunk, total = config().chunk_size, st.count
-  local function step(first)
-    if st.closed or first > total then
-      return
-    end
-    local last = math.min(total, first + chunk - 1)
-    local cached = true
-    for i = first, last do
-      cached = cached and exists(page_png(st, i))
-    end
-    local function done()
-      for i = first, last do
-        st.rendered[i] = exists(page_png(st, i))
-      end
+-- Coalesces redraws: several renders finishing together cause one redraw.
+local function request_draw(buf, st)
+  if st.draw_pending then
+    return
+  end
+  st.draw_pending = true
+  vim.schedule(function()
+    st.draw_pending = false
+    if not st.closed and vim.api.nvim_buf_is_valid(buf) then
       M.draw(buf)
-      step(last + 1)
     end
-    if cached then
-      done()
+  end)
+end
+
+local function render_all(buf, st)
+  local todo = {}
+  for i = 1, st.count do
+    if exists(page_png(st, i)) then
+      st.rendered[i] = true
     else
-      render_range(st, first, last, function(ok, err)
-        if not ok then
+      todo[#todo + 1] = i
+    end
+  end
+  -- The first pages missing (the ones in view) get a job each so they appear as soon as
+  -- possible; the rest are batched. Jobs run on several Ghostscript processes at once.
+  local jobs, k = {}, 1
+  while k <= #todo do
+    local size = #jobs < 2 and 1 or config().chunk_size
+    local first, last = todo[k], todo[k]
+    while k < #todo and todo[k + 1] == last + 1 and last - first + 1 < size do
+      k = k + 1
+      last = todo[k]
+    end
+    jobs[#jobs + 1] = { first, last }
+    k = k + 1
+  end
+
+  M.draw(buf)
+  local next_job, running = 1, 0
+  local function start()
+    while not st.closed and running < math.max(1, config().jobs) and next_job <= #jobs do
+      local job = jobs[next_job]
+      next_job, running = next_job + 1, running + 1
+      render_range(st, job[1], job[2], function(ok, err)
+        running = running - 1
+        if not ok and not st.warned then
+          st.warned = true
           vim.notify("docview: Ghostscript failed: " .. err, vim.log.levels.WARN)
         end
-        done()
+        for i = job[1], job[2] do
+          st.rendered[i] = exists(page_png(st, i))
+        end
+        request_draw(buf, st)
+        start()
       end)
     end
   end
-  step(1)
+  start()
 end
 
 --- Shows `path` as page images in `buf`. `on_fail(reason)` is called if that is not possible.
@@ -448,6 +509,7 @@ function M.show(buf, path, on_fail)
     rendered = {},
     layout = {},
     placed = {},
+    placed_at = {},
     sharpening = {},
     zoom = 1,
     status = "Rendering pages…",
