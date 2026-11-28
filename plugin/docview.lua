@@ -26,6 +26,19 @@ vim.api.nvim_create_user_command("DocviewToggle", function()
   require("docview").toggle()
 end, { desc = "Switch between page images and text" })
 
+vim.api.nvim_create_user_command("DocviewCleanCache", function()
+  require("docview.cache").prune(function(report)
+    vim.notify("docview: " .. require("docview.cache").describe(report))
+  end)
+end, { desc = "Remove old cached pages and backups now (also runs after startup)" })
+
+-- After setup() has run, and once Neovim has settled, so startup isn't slowed.
+vim.defer_fn(function()
+  if require("docview").config.cache.auto_clean then
+    require("docview.cache").prune()
+  end
+end, 5000)
+
 vim.api.nvim_create_user_command("DocviewClearCache", function()
   local dir = vim.fn.stdpath("cache") .. "/docview"
   vim.fn.delete(dir, "rf")

@@ -18,7 +18,7 @@ image support, scrolling line by line like any buffer.
 
 Converted PDFs and page images are cached (by path, size and modification time), so a
 document is only converted once; reopening it is instant. The first pages appear while
-the rest are still rendering. `:DocviewClearCache` frees the space.
+the rest are still rendering.
 
 When page images aren't possible (another terminal, missing tools), documents open as text
 and `:DocviewInfo` says why.
@@ -50,6 +50,21 @@ Before the first save of each editing session the original is copied to
 `:w data.csv` writes the Markdown/CSV itself; `:w copy.docx` saves a converted copy.
 
 Editing Word, ODT and RTF needs [pandoc](https://pandoc.org): `brew install pandoc`.
+
+## Cache
+
+Page images and converted PDFs are kept in `~/.cache/nvim/docview` and cleaned up
+automatically a few seconds after Neovim starts:
+
+- a document's old versions are deleted as soon as it is rendered again after a change,
+  and versions of deleted or changed documents at the next cleanup;
+- documents not opened or previewed for 30 days are deleted;
+- sharper renders made while zoomed in are deleted after a day;
+- above 1 GB in total, the least recently used documents go first;
+- edit backups: the newest 5 per document are kept, none older than 90 days.
+
+Documents on screen are never touched. `:DocviewCleanCache` runs the cleanup now and
+reports what it freed; `:DocviewClearCache` deletes the whole cache.
 
 ## Text view
 
@@ -86,6 +101,7 @@ Without a plugin manager: `vim.opt.rtp:prepend("~/path/to/docview.nvim")`.
 | `gO`                   | Open the file in its default app (`:DocviewOpen`)  |
 | `:DocviewReload`       | Re-convert (e.g. after the file changed)           |
 | `:DocviewInfo`         | Show which converter was used                      |
+| `:DocviewCleanCache`   | Clean up old cached pages and backups now          |
 | `:DocviewClearCache`   | Delete cached page images and PDFs                 |
 | `:checkhealth docview` | See what is installed                              |
 
@@ -104,6 +120,14 @@ require("docview").setup({
   picker = {
     enabled = true, -- preview documents in snacks.nvim's picker
     pages = true, -- show pages instead of text in previews
+  },
+  cache = {
+    auto_clean = true, -- clean up shortly after startup
+    max_age_days = 30, -- documents not opened for this long
+    max_size_mb = 1024, -- beyond this, least recently used documents go first
+    zoom_age_days = 1, -- sharper renders made while zoomed in
+    backups_keep = 5, -- edit backups kept per document
+    backups_max_age_days = 90,
   },
   edit = {
     preview = true, -- real pages in a split while editing, refreshed on save

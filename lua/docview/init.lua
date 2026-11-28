@@ -27,6 +27,20 @@ M.config = {
     -- Show the pages (scrollable) instead of the text.
     pages = true,
   },
+  -- Cleanup of cached pages and edit backups, run shortly after startup.
+  -- :DocviewCleanCache runs it on demand; :DocviewClearCache deletes the whole cache.
+  cache = {
+    auto_clean = true,
+    -- Documents not opened (or previewed) for this long.
+    max_age_days = 30,
+    -- Beyond this, the least recently used documents go first.
+    max_size_mb = 1024,
+    -- Sharper renders made while zoomed in.
+    zoom_age_days = 1,
+    -- Edit backups: the newest few per document, none older than the age limit.
+    backups_keep = 5,
+    backups_max_age_days = 90,
+  },
   edit = {
     -- Show the real pages in a split while editing, refreshed on every save.
     preview = true,

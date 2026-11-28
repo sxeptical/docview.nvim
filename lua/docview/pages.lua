@@ -99,11 +99,39 @@ local function snacks_dpi(png)
   return x / 100
 end
 
+--- Whether a cache folder is being shown right now (so cleanup must leave it alone).
+function M.in_use(dir)
+  for _, st in pairs(M.state) do
+    if st.dir == dir then
+      return true
+    end
+  end
+  return false
+end
+
+-- One folder per version of a document: "<path hash>-<version hash>", so the versions of
+-- one document can be found by their shared prefix. The folder's modification time records
+-- when it was last used, for `docview.cache` to clean up by age.
 local function cache_dir(path)
   local stat = assert(vim.uv.fs_stat(path))
   local key = table.concat({ path, stat.size, stat.mtime.sec, stat.mtime.nsec }, ":")
-  local dir = vim.fn.stdpath("cache") .. "/docview/" .. vim.fn.sha256(key):sub(1, 16)
+  local root = require("docview.cache").root()
+  local prefix = vim.fn.sha256(path):sub(1, 12)
+  local dir = ("%s/%s-%s"):format(root, prefix, vim.fn.sha256(key):sub(1, 12))
+  if vim.fn.isdirectory(dir) == 1 then
+    local now = os.time()
+    vim.uv.fs_utime(dir, now, now)
+    return dir
+  end
   vim.fn.mkdir(dir, "p")
+  vim.fn.writefile({ path }, dir .. "/source")
+  -- The document changed since it was last rendered: its earlier versions are useless now.
+  for name in vim.fs.dir(root) do
+    local other = root .. "/" .. name
+    if vim.startswith(name, prefix .. "-") and other ~= dir and not M.in_use(other) then
+      vim.fn.delete(other, "rf")
+    end
+  end
   return dir
 end
 
@@ -117,7 +145,8 @@ local function next_conversion()
   office_busy = true
   local job = table.remove(office_queue, 1)
   -- A private profile lets this run while the LibreOffice app is open.
-  local profile = vim.uri_from_fname(vim.fn.stdpath("cache") .. "/docview/libreoffice-profile")
+  -- Kept out of the cache so clearing it doesn't make LibreOffice set itself up again.
+  local profile = vim.uri_from_fname(vim.fn.stdpath("data") .. "/docview/libreoffice-profile")
   local cmd = { soffice(), "-env:UserInstallation=" .. profile, "--headless", "--norestore" }
   vim.list_extend(cmd, { "--convert-to", "pdf", "--outdir", job.dir, job.source })
   local produced = job.dir .. "/" .. vim.fn.fnamemodify(job.source, ":t:r") .. ".pdf"
